@@ -30,9 +30,9 @@ using namespace sf;
 
 // Mandelbrot set parameters
 struct MandelbrotParams {
-    float zoom = 1.0f;
-    float offsetX = 0.3f;
-    float offsetY = 1.0f;
+    double zoom = 1.0;
+    double offsetX = 0.3;
+    double offsetY = 1.0;
     int maxIterations = 100;
     int colorMode = 0;
     int colorModeBg = 0;
@@ -63,14 +63,32 @@ struct MandelbrotParams {
     };
     
     void reset() {
-        zoom = 2.0f;
-        offsetX = 0.0f;
-        offsetY = 0.0f;
+        zoom = 2.0;
+        offsetX = 0.0;
+        offsetY = 0.0;
         maxIterations = 100;
         colorMode = 0;
         adaptiveIterations = true;
     }
 };
+
+enum ArgType {
+    ARG_NO_DEPTH,
+    ARG_AA,
+    ARG_VSYNC,
+    ARG_USE_DOUBLE,
+    ARG_MAX_ITERS,
+    ARG_UNKNOWN
+};
+
+ArgType getArgType(const char* arg) {
+    if (strcmp(arg, "--no-depth") == 0) return ARG_NO_DEPTH;
+    if (strcmp(arg, "--aa") == 0)       return ARG_AA;
+    if (strcmp(arg, "--vsync") == 0)    return ARG_VSYNC;
+    if (strcmp(arg, "--use-double") == 0) return ARG_USE_DOUBLE;
+    if (strcmp(arg, "--max-iters") == 0) return ARG_MAX_ITERS;
+    return ARG_UNKNOWN;
+}
 
 // Function to check OpenGL errors
 void checkGLError(const string& operation) {
@@ -122,9 +140,18 @@ GLuint compileShader(const string& source, GLenum shaderType) {
 }
 
 // Function to create shader program
-GLuint createShaderProgram(const string& vertexPath, const string& fragmentPath) {
+GLuint createShaderProgram(const string& vertexPath, const string& fragmentPath, bool useDouble = false) {
     string vertexSource = readShaderFile(vertexPath);
     string fragmentSource = readShaderFile(fragmentPath);
+    
+    // Add double precision define if requested
+    if (useDouble) {
+        // Insert the define after the version directive
+        size_t versionEnd = fragmentSource.find('\n');
+        if (versionEnd != string::npos) {
+            fragmentSource.insert(versionEnd + 1, "#define USE_DOUBLE_PRECISION\n");
+        }
+    }
     
     GLuint vertexShader = compileShader(vertexSource, GL_VERTEX_SHADER);
     GLuint fragmentShader = compileShader(fragmentSource, GL_FRAGMENT_SHADER);
@@ -160,33 +187,33 @@ struct Character {
 // Text renderer class
 class TextRenderer {
 public:
-    std::map<char, Character> characters;
+    map<char, Character> characters;
     GLuint VAO, VBO;
     GLuint shaderProgram;
     
     TextRenderer() {}
     
-    bool initialize(const std::string& fontPath, int fontSize) {
+    bool initialize(const string& fontPath, int fontSize) {
         // Load font file
-        std::ifstream file(fontPath, std::ios::binary);
+        ifstream file(fontPath, ios::binary);
         if (!file.is_open()) {
-            std::cerr << "Failed to open font file: " << fontPath << std::endl;
+            cerr << "Failed to open font file: " << fontPath << endl;
             return false;
         }
         
         // Get file size and read data
-        file.seekg(0, std::ios::end);
+        file.seekg(0, ios::end);
         size_t fileSize = file.tellg();
-        file.seekg(0, std::ios::beg);
+        file.seekg(0, ios::beg);
         
-        std::vector<unsigned char> fontData(fileSize);
+        vector<unsigned char> fontData(fileSize);
         file.read(reinterpret_cast<char*>(fontData.data()), fileSize);
         file.close();
         
         // Initialize stb_truetype
         stbtt_fontinfo font;
         if (!stbtt_InitFont(&font, fontData.data(), 0)) {
-            std::cerr << "Failed to initialize font" << std::endl;
+            cerr << "Failed to initialize font" << endl;
             return false;
         }
         
@@ -234,7 +261,7 @@ public:
         // Create shader program for text
         shaderProgram = createShaderProgram("res/shaders/text_vertex.glsl", "res/shaders/text_fragment.glsl");
         if (shaderProgram == 0) {
-            std::cerr << "Failed to create text shader program!" << std::endl;
+            cerr << "Failed to create text shader program!" << endl;
             return false;
         }
         
@@ -252,7 +279,7 @@ public:
         return true;
     }
     
-    void renderText(const std::string& text, float x, float y, float scale, const sf::Vector3f& color, int windowWidth, int windowHeight) {
+    void renderText(const string& text, float x, float y, float scale, const sf::Vector3f& color, int windowWidth, int windowHeight) {
         // Create orthographic projection matrix
         float left = 0.0f;
         float right = static_cast<float>(windowWidth);
@@ -277,10 +304,14 @@ public:
         glUseProgram(shaderProgram);
         GLint projLoc = glGetUniformLocation(shaderProgram, "projection");
         GLint colorLoc = glGetUniformLocation(shaderProgram, "textColor");
+        GLint texLoc = glGetUniformLocation(shaderProgram, "text");
         
         glUniformMatrix4fv(projLoc, 1, GL_TRUE, projection); // GL_TRUE for row-major
         glUniform3f(colorLoc, color.x, color.y, color.z);
         glActiveTexture(GL_TEXTURE0);
+        if (texLoc != -1) {
+            glUniform1i(texLoc, 0); // Bind texture unit 0
+        }
         glBindVertexArray(VAO);
         
         // Iterate through all characters
@@ -335,21 +366,77 @@ public:
     }
 };
 
-int main() {
+int main(int argc, char* argv[]) {
     // Initialize Mandelbrot parameters
     MandelbrotParams params;
     // Create context settings with depth buffer
     ContextSettings settings;
     settings.depthBits = 24;
     settings.stencilBits = 8;
-    settings.majorVersion = 3;
-    settings.minorVersion = 3;
+    settings.majorVersion = 4;  // OpenGL 4.1 required for double precision
+    settings.minorVersion = 1;
     settings.antiAliasingLevel = 4;
     settings.attributeFlags = ContextSettings::Core;  // Request core profile
+
+    bool useDouble = false; bool useVsync = true;
+    if (argc > 1) {
+        for (int i = 1; i < argc; i++) {
+            switch (getArgType(argv[i])) {
+                case ARG_NO_DEPTH:
+                    settings.depthBits = 0;
+                    settings.stencilBits = 0;
+                    break;
+                case ARG_AA: {
+                    if (i + 1 >= argc) {
+                        cerr << "Missing value for --aa" << endl;
+                        return -1;
+                    }
+                    int value = stoi(argv[++i]); // consume number
+                    if (value < 0 || value > 16) {
+                        cerr << "Anti-aliasing level must be between 0 and 16" << endl;
+                        return -1;
+                    }
+                    settings.antiAliasingLevel = value;
+                    break;
+                }
+                case ARG_VSYNC: {
+                    if (i + 1 >= argc) {
+                        cerr << "Missing value for --vsync (true/false)" << endl;
+                        return -1;
+                    }
+                    string val = argv[++i];
+                    if (val == "true") {
+                        useVsync = true;
+                    } else if (val == "false") {
+                        useVsync = false;
+                    } else {
+                        cerr << "Invalid value for --vsync (must be true/false)" << endl;
+                        return -1;
+                    }
+                    break;
+                }
+                case ARG_MAX_ITERS: {
+                    if (i + 1 >= argc) {
+                        cerr << "Missing value for --max-iters" << endl;
+                        return -1;
+                    }
+                    int value = stoi(argv[++i]); // consume number
+                    if (value < 0 || value > 1000) {
+                        cerr << "Max iterations must be between 0 and 1000" << endl;
+                        return -1;
+                    }
+                    params.maxIterations = value;
+                    break;
+                }
+                case ARG_USE_DOUBLE: useDouble = true; break;
+                case ARG_UNKNOWN: cerr << "Unknown argument: " << argv[i] << endl; return -1;
+            }
+        }
+    }
     
     // create the window with OpenGL context settings
     Window window(VideoMode({1200, 800}), "Mandelbrot Set Explorer - C++", State::Windowed, settings);
-    window.setVerticalSyncEnabled(false);
+    window.setVerticalSyncEnabled(useVsync);
 
     // activate the window
     if (!window.setActive(true)) {
@@ -365,9 +452,13 @@ int main() {
     // Print OpenGL version info
     cout << "OpenGL Version: " << glGetString(GL_VERSION) << endl;
     cout << "GLSL Version: " << glGetString(GL_SHADING_LANGUAGE_VERSION) << endl;
+    
+#ifdef __APPLE__
+    cout << "Note: On macOS, you may see 'FALLBACK' warnings - these are expected and don't affect functionality." << endl;
+#endif
 
     // Create shader program
-    GLuint shaderProgram = createShaderProgram("res/shaders/vertex.glsl", "res/shaders/fragment.glsl");
+    GLuint shaderProgram = createShaderProgram("res/shaders/vertex.glsl", "res/shaders/fragment.glsl", useDouble);
     if (shaderProgram == 0) {
         cerr << "Failed to create shader program!" << endl;
         return -1;
@@ -442,8 +533,13 @@ int main() {
 
     // Get uniform locations for Mandelbrot parameters
     GLint resolutionLoc = glGetUniformLocation(shaderProgram, "resolution");
-    GLint zoomLoc = glGetUniformLocation(shaderProgram, "zoom");
-    GLint offsetLoc = glGetUniformLocation(shaderProgram, "offset");
+    GLint zoomLoc, offsetLoc;
+    
+    // Always use single precision uniforms (shader compatibility)
+    // But keep double precision on CPU side for better calculations
+    zoomLoc = glGetUniformLocation(shaderProgram, "zoom");
+    offsetLoc = glGetUniformLocation(shaderProgram, "offset");
+    
     GLint maxIterationsLoc = glGetUniformLocation(shaderProgram, "maxIterations");
     GLint colorLoc = glGetUniformLocation(shaderProgram, "color");
     GLint colorBgLoc = glGetUniformLocation(shaderProgram, "colorBg");
@@ -452,6 +548,10 @@ int main() {
     cout << "Uniform locations - resolution: " << resolutionLoc << ", zoom: " << zoomLoc 
          << ", offset: " << offsetLoc << ", maxIterations: " << maxIterationsLoc 
          << ", colorMode: " << colorLoc << ", adaptive: " << adaptiveIterationsLoc << endl;
+    
+    if (useDouble) {
+        cout << "Using double precision for CPU calculations with high precision shader" << endl;
+    }
 
     Clock clock;
     
@@ -477,7 +577,7 @@ int main() {
     bool running = true;
     while (running) {
         // handle events
-        while (const std::optional event = window.pollEvent()) {
+        while (const optional event = window.pollEvent()) {
             if (event->is<Event::Closed>()) {
                 running = false;
             }
@@ -506,10 +606,10 @@ int main() {
                         params.colorModeBg = (params.colorModeBg - 1 + params.colors.size()) % params.colors.size();
                         break;
                     case Keyboard::Key::Equal:  // + key
-                        params.maxIterations = std::min(1000, params.maxIterations + 10);
+                        params.maxIterations = min(1000, params.maxIterations + 10);
                         break;
                     case Keyboard::Key::Hyphen:  // - key
-                        params.maxIterations = std::max(10, params.maxIterations - 10);
+                        params.maxIterations = max(10, params.maxIterations - 10);
                         break;
                     case Keyboard::Key::A:  // Toggle adaptive iterations
                         params.adaptiveIterations = !params.adaptiveIterations;
@@ -537,10 +637,10 @@ int main() {
                     
                     // Convert screen coordinates to complex plane coordinates
                     Vector2u windowSize = window.getSize();
-                    float aspectRatio = static_cast<float>(windowSize.x) / static_cast<float>(windowSize.y);
+                    double aspectRatio = static_cast<double>(windowSize.x) / static_cast<double>(windowSize.y);
                     
-                    params.offsetX -= (deltaX / static_cast<float>(windowSize.x)) * params.zoom * aspectRatio * 2.0f;
-                    params.offsetY -= (deltaY / static_cast<float>(windowSize.y)) * params.zoom * 2.0f;
+                    params.offsetX -= (static_cast<double>(deltaX) / static_cast<double>(windowSize.x)) * params.zoom * aspectRatio * 2.0;
+                    params.offsetY -= (static_cast<double>(deltaY) / static_cast<double>(windowSize.y)) * params.zoom * 2.0;
                     
                     params.lastMouseX = static_cast<float>(mouseMoved->position.x);
                     params.lastMouseY = static_cast<float>(mouseMoved->position.y);
@@ -549,21 +649,21 @@ int main() {
             else if (const auto* mouseWheelScrolled = event->getIf<Event::MouseWheelScrolled>()) {
                 if (mouseWheelScrolled->wheel == Mouse::Wheel::Vertical) {
                     // Smaller zoom steps for more precise control
-                    float zoomFactor = mouseWheelScrolled->delta > 0 ? 0.85f : 1.176f;
+                    double zoomFactor = mouseWheelScrolled->delta > 0 ? 0.85 : 1.176;
                     
                     // Get mouse position relative to center
                     Vector2i mousePos = Mouse::getPosition(window);
                     Vector2u windowSize = window.getSize();
                     
-                    float mouseX = (static_cast<float>(mousePos.x) / static_cast<float>(windowSize.x) - 0.5f) * 2.0f;
-                    float mouseY = -(static_cast<float>(mousePos.y) / static_cast<float>(windowSize.y) - 0.5f) * 2.0f;
+                    double mouseX = (static_cast<double>(mousePos.x) / static_cast<double>(windowSize.x) - 0.5) * 2.0;
+                    double mouseY = -(static_cast<double>(mousePos.y) / static_cast<double>(windowSize.y) - 0.5) * 2.0;
                     
-                    float aspectRatio = static_cast<float>(windowSize.x) / static_cast<float>(windowSize.y);
+                    double aspectRatio = static_cast<double>(windowSize.x) / static_cast<double>(windowSize.y);
                     mouseX *= aspectRatio;
                     
                     // Convert to complex plane coordinates
-                    float complexX = mouseX * params.zoom + params.offsetX;
-                    float complexY = mouseY * params.zoom + params.offsetY;
+                    double complexX = mouseX * params.zoom + params.offsetX;
+                    double complexY = mouseY * params.zoom + params.offsetY;
                     
                     // Zoom
                     params.zoom *= zoomFactor;
@@ -588,8 +688,11 @@ int main() {
         Vector3f color = params.colors[params.colorMode];
         Vector3f colorBg = params.colorsBg[params.colorModeBg];
         glUniform2f(resolutionLoc, static_cast<float>(windowSize.x), static_cast<float>(windowSize.y));
-        glUniform1f(zoomLoc, params.zoom);
-        glUniform2f(offsetLoc, params.offsetX, params.offsetY);
+        
+        // Always use float uniforms but convert from double precision CPU values
+        glUniform1f(zoomLoc, static_cast<float>(params.zoom));
+        glUniform2f(offsetLoc, static_cast<float>(params.offsetX), static_cast<float>(params.offsetY));
+        
         glUniform1i(maxIterationsLoc, params.maxIterations);
         glUniform3f(colorLoc, color.x, color.y, color.z);
         glUniform3f(colorBgLoc, colorBg.x, colorBg.y, colorBg.z);
@@ -614,8 +717,8 @@ int main() {
         }
         
         // Render FPS text
-        std::stringstream fpsStream;
-        fpsStream << std::fixed << std::setprecision(0) << "FPS: " << fps;
+        stringstream fpsStream;
+        fpsStream << fixed << setprecision(0) << "FPS: " << fps;
         textRenderer.renderText(fpsStream.str(), 10.0f, 30.0f, 1.0f, sf::Vector3f(1.0f, 1.0f, 1.0f), windowSize.x, windowSize.y);
 
         // end the current frame (internally swaps the front and back buffers)

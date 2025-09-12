@@ -78,6 +78,9 @@ perf.data*
 *.swo
 *~
 
+#include
+include/
+
 # System files
 .DS_Store
 .DS_Store?
